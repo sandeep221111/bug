@@ -1227,8 +1227,17 @@ function fmtTime(isoStr) {
   });
 }
 function fmtLastSeen(isoStr){
-  if (!isoStr) return 'long ago';
-  const s = Math.floor((Date.now() - new Date(isoStr).getTime())/1000);
+  if (typeof isoStr !== 'string' || !isoStr.trim()) return 'long ago';
+
+  const value = isoStr.trim();
+  const utcValue = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value)
+    ? value
+    : value + 'Z';
+  const timestamp = Date.parse(utcValue);
+
+  if (!Number.isFinite(timestamp)) return 'long ago';
+
+  const s = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
   if (s < 60) return 'just now';
   if (s < 3600) return Math.floor(s/60) + 'm ago';
   if (s < 86400) return Math.floor(s/3600) + 'h ago';
@@ -2523,7 +2532,11 @@ function updatePresence(d){
     if (c.user.id === d.user_id){
       c.user.is_online = online;
 
-      if (!online){
+      const lastSeen = typeof d.last_seen === 'string' ? d.last_seen.trim() : '';
+      const utcLastSeen = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(lastSeen)
+        ? lastSeen
+        : lastSeen + 'Z';
+      if (!online && lastSeen && Number.isFinite(Date.parse(utcLastSeen))){
         c.user.last_seen = d.last_seen;
       }
     }
