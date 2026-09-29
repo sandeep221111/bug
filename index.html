@@ -268,6 +268,9 @@ html,body{width:100%;height:100%;background:var(--bd);font-family:'DM Sans',sans
   padding:5px 13px;border-radius:20px;font-size:.73rem;font-weight:700;color:var(--ep)}
 /* messages */
 .msg-row{display:flex;align-items:flex-end;gap:6px}
+.message-date-separator{align-self:center;padding:5px 11px;border-radius:12px;
+  background:rgba(255,255,255,.08);color:var(--muted);font-size:.68rem;
+  line-height:1.2;text-align:center}
 .msg-row.me{align-self:flex-end;flex-direction:row-reverse;max-width:82%}
 .msg-row.them{align-self:flex-start;max-width:82%}
 .msg-av-sm{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;
@@ -1227,6 +1230,56 @@ function fmtTime(isoStr) {
     hour12: true
   });
 }
+function messageDateInfo(value, now = new Date()){
+  if (typeof value !== 'string' || !value.trim()) return null;
+
+  const timestamp = value.trim();
+  const utcValue = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(timestamp)
+    ? timestamp
+    : timestamp + 'Z';
+  const date = new Date(utcValue);
+  if (!Number.isFinite(date.getTime())) return null;
+
+  const key = [date.getFullYear(), date.getMonth() + 1, date.getDate()]
+    .map((part, index) => index === 0 ? String(part) : String(part).padStart(2, '0'))
+    .join('-');
+  const localDayNumber = value => Math.floor(Date.UTC(
+    value.getFullYear(), value.getMonth(), value.getDate()
+  ) / 86400000);
+  const daysAgo = localDayNumber(now) - localDayNumber(date);
+
+  let label;
+  if (daysAgo === 0) label = 'Today';
+  else if (daysAgo === 1) label = 'Yesterday';
+  else if (daysAgo > 1 && daysAgo <= 6) {
+    label = date.toLocaleDateString(undefined, { weekday: 'long' });
+  } else {
+    label = date.toLocaleDateString(undefined, {
+      day: 'numeric', month: 'short', year: 'numeric'
+    });
+  }
+
+  return { key, label };
+}
+function syncMessageDateSeparators(container){
+  container.querySelectorAll('.message-date-separator').forEach(node=>node.remove());
+
+  let previousKey = null;
+  Array.from(container.children).forEach(row=>{
+    if (!row.classList.contains('msg-row')) return;
+
+    const dateInfo = messageDateInfo(row.dataset.messageCreatedAt || '');
+    row.dataset.localDateKey = dateInfo ? dateInfo.key : '';
+    if (dateInfo && dateInfo.key !== previousKey){
+      const separator = document.createElement('div');
+      separator.className = 'message-date-separator';
+      separator.setAttribute('role', 'separator');
+      separator.textContent = dateInfo.label;
+      container.insertBefore(separator, row);
+    }
+    previousKey = dateInfo ? dateInfo.key : null;
+  });
+}
 function fmtLastSeen(isoStr){
   if (typeof isoStr !== 'string' || !isoStr.trim()) return 'long ago';
 
@@ -1630,7 +1683,7 @@ const row = document.createElement('div');
 
 row.className =
   `msg-row ${isMine ? 'me' : 'them'}`;
-
+row.dataset.messageCreatedAt = msg.created_at || '';
 
 if (msg.id) {
   row.dataset.messageId = String(msg.id);
@@ -1962,6 +2015,7 @@ if (!isMine) {
 
 
 ms.appendChild(row);
+syncMessageDateSeparators(ms);
 
 
 /* =========================
@@ -2398,9 +2452,17 @@ function confirmSent(d){
 
   if (m){
     m.id = d.message_id;
+    if (d.created_at) m.created_at = d.created_at;
   }
 
   if (e){
+    if (d.created_at){
+      e.row.dataset.messageCreatedAt = d.created_at;
+      const container = e.row.parentElement;
+      if (container && container.id === 'msgsScroll'){
+        syncMessageDateSeparators(container);
+      }
+    }
     if (e.tick){
       e.tick.textContent = '✓';
       e.tick.classList.remove('seen');

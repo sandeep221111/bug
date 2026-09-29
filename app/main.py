@@ -432,7 +432,8 @@ def delete_chat_from_database(
 
     return {
         "chat_id": chat_id,
-        "user_id": user_id
+        "user_id": user_id,
+        "other_user_id": other_user(chat, user_id)
     }
 # ============================================================
 # DELIVERY / READ
@@ -596,7 +597,6 @@ async def safe_send(
 
 async def broadcast_presence(
     user_id: int,
-    partners: dict[int, int],
     status: str,
     last_seen=None
 ):
@@ -607,11 +607,12 @@ async def broadcast_presence(
         "last_seen": last_seen
     }
 
-    for chat_id, partner_id in partners.items():
+    # Presence belongs to the user, not a chat. Send it to every connected
+    # account so soft-deleted chats and chat-bound sockets cannot miss it.
+    for recipient_id in manager.online_ids() - {user_id}:
         await manager.send_to_user(
-            partner_id,
-            payload,
-            chat_id
+            recipient_id,
+            payload
         )
 
 
@@ -651,14 +652,8 @@ async def go_offline(user_id: int):
             )
             return
 
-        partners = await db_call(
-            get_partners,
-            user_id
-        )
-
         await broadcast_presence(
             user_id,
-            partners,
             "offline",
             last_seen
         )
@@ -1473,7 +1468,6 @@ async def handle_socket(
 
             await broadcast_presence(
                 user_id,
-                partners,
                 "online"
             )
 
@@ -1483,13 +1477,9 @@ async def handle_socket(
                 "type": "ready",
                 "user_id": user_id,
                 "online_user_ids": [
-                    partner_id
-                    for partner_id in set(
-                        partners.values()
-                    )
-                    if manager.is_online(
-                        partner_id
-                    )
+                    online_id
+                    for online_id in manager.online_ids()
+                    if online_id != user_id
                 ]
             }
         )
