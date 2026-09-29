@@ -1190,6 +1190,7 @@ const APP = {
 
 const CHATS  = [];                    // GET /chats summaries
 let   USERS  = [];                    // GET /users
+let   ONLINE_USER_IDS = null;           // WebSocket presence snapshot
 const MSG_CACHE = new Map();          // chat_id -> [messages]
 const MSG_ELS   = new Map();          // message_id|client_id -> {tick, contentEl, row}
 let   WS=null, wsPing=null, wsRetry=0, typingTO=null, lastTypingSent=0;
@@ -1397,7 +1398,7 @@ function logout(silent){
   localStorage.removeItem('raahi_token');
   try{ if (WS) WS.close(); }catch(_){}
   WS = null; clearInterval(wsPing);
-  CHATS.length = 0; USERS = []; MSG_CACHE.clear(); MSG_ELS.clear();
+  CHATS.length = 0; USERS = []; ONLINE_USER_IDS = null; MSG_CACHE.clear(); MSG_ELS.clear();
   APP.currentChatId = null;
   if (!silent) toast('👋 Logged out');
   showScreen('sAuth');
@@ -1446,9 +1447,9 @@ function handleWSEvent(d){
   }
 }
 function markOnline(ids){
-  const set = new Set(ids);
-  USERS.forEach(u=>u.is_online = set.has(u.id));
-  CHATS.forEach(c=>c.user.is_online = set.has(c.user.id));
+  ONLINE_USER_IDS = new Set(ids.map(id=>String(id)));
+  USERS.forEach(u=>u.is_online = ONLINE_USER_IDS.has(String(u.id)));
+  CHATS.forEach(c=>c.user.is_online = ONLINE_USER_IDS.has(String(c.user.id)));
   renderMatchesScreen();
 }
 
@@ -1457,11 +1458,17 @@ function markOnline(ids){
 ═══════════════════════════════════════════════════ */
 async function loadChats(){
   const data = await api('/chats');
+  if (ONLINE_USER_IDS !== null){
+    data.forEach(c=>c.user.is_online = ONLINE_USER_IDS.has(String(c.user.id)));
+  }
   CHATS.length = 0; CHATS.push(...data);
   renderMatchesScreen();
 }
 async function loadUsers(){
   USERS = (await api('/users')).filter(u => u.id !== (AUTH.me && AUTH.me.id));
+  if (ONLINE_USER_IDS !== null){
+    USERS.forEach(u=>u.is_online = ONLINE_USER_IDS.has(String(u.id)));
+  }
   renderNewMatchRow();
 }
 function renderMatchesScreen(){
@@ -1596,9 +1603,9 @@ function renderMatchIntro(chat){
   const intro = document.createElement('div');
   intro.className = 'match-intro';
   intro.innerHTML = `
-    <div class="av av-lg" style="border-color:${er.primary};background:${er.cbg};margin-bottom:9px;animation:avpulse 3s ease-in-out infinite">${initialsHTML(chat.user.username,1.6)}</div>
+    <div class="av av-lg match-intro-avatar" style="border-color:${er.primary};background:${er.cbg};margin-bottom:9px;animation:avpulse 3s ease-in-out infinite">${initialsHTML(chat.user.username,1.6)}${onlineDot(chat.user.is_online)}</div>
     <div style="font-family:'Syne',sans-serif;font-weight:700;font-size:1rem;color:#fff;margin-bottom:2px">${chat.user.username}</div>
-    <div style="font-size:.74rem;color:var(--muted);margin-bottom:10px">${er.name} ${er.emoji} · ${chat.user.is_online ? '🟢 Online now' : '🕐 last seen ' + fmtLastSeen(chat.user.last_seen)}</div>
+    <div class="match-intro-presence" style="font-size:.74rem;color:var(--muted);margin-bottom:10px">${er.name} ${er.emoji} · ${chat.user.is_online ? '🟢 Online now' : '🕐 last seen ' + fmtLastSeen(chat.user.last_seen)}</div>
     <div class="match-intro-floats"><span class="e e-heart">💗</span><span class="e e-float" style="animation-delay:.4s">💫</span><span class="e e-heart" style="animation-delay:.8s">💕</span></div>
     <div class="match-pill"><span class="e e-tada" style="display:inline-block">🎉</span> You two are connected — say hi!</div>`;
   ms.appendChild(intro);
@@ -2521,15 +2528,19 @@ function clearTyping(){
 
 function updatePresence(d){
   const online = d.status === 'online';
+  const userId = String(d.user_id);
+  if (ONLINE_USER_IDS === null) ONLINE_USER_IDS = new Set();
+  if (online) ONLINE_USER_IDS.add(userId);
+  else ONLINE_USER_IDS.delete(userId);
 
   USERS.forEach(u=>{
-    if (u.id === d.user_id){
+    if (String(u.id) === userId){
       u.is_online = online;
     }
   });
 
   CHATS.forEach(c=>{
-    if (c.user.id === d.user_id){
+    if (String(c.user.id) === userId){
       c.user.is_online = online;
 
       const lastSeen = typeof d.last_seen === 'string' ? d.last_seen.trim() : '';
@@ -2546,11 +2557,27 @@ function updatePresence(d){
 
   const cur = getChat(APP.currentChatId);
 
-  if (
-    cur &&
-    cur.user.id === d.user_id
-  ){
+  if (cur && String(cur.user.id) === userId){
     renderChatHeader(cur);
+    const introAvatar = document.querySelector('#msgsScroll .match-intro-avatar');
+    const introPresence = document.querySelector('#msgsScroll .match-intro-presence');
+    if (introAvatar){
+      introAvatar.innerHTML = initialsHTML(cur.user.username, 1.6) + onlineDot(cur.user.is_online);
+    }
+    if (introPresence){
+      const er = ERA[eraFor(cur.user.id)];
+      introPresence.textContent = `${er.name} ${er.emoji} · ${cur.user.is_online ? '🟢 Online now' : '🕐 last seen ' + fmtLastSeen(cur.user.last_seen)}`;
+    }
+  }
+
+  const settingsAvatar = document.getElementById('msAvEl');
+  if (settingsAvatar && settingsAvatar.dataset.userId === userId){
+    const chat = CHATS.find(c=>String(c.user.id) === userId);
+    if (chat){
+      settingsAvatar.innerHTML = initialsHTML(chat.user.username, 1.1) + onlineDot(chat.user.is_online);
+      document.getElementById('msMetaEl').textContent =
+        `${ERA[eraFor(chat.user.id)].name} ${ERA[eraFor(chat.user.id)].emoji} · ${chat.user.is_online ? '🟢 Online' : '🕐 last seen ' + fmtLastSeen(chat.user.last_seen)}`;
+    }
   }
 }
 
@@ -2672,8 +2699,9 @@ function openMatchSettings(chatId){
   av.style.borderColor = er.primary;
   av.style.background = er.cbg;
 
+  av.dataset.userId = String(chat.user.id);
   av.innerHTML =
-    initialsHTML(chat.user.username, 1.1);
+    initialsHTML(chat.user.username, 1.1) + onlineDot(chat.user.is_online);
 
   document.getElementById('msNameEl').textContent =
     chat.user.username;
