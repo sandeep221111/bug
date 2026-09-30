@@ -962,7 +962,7 @@ html,body{width:100%;height:100%;background:var(--bd);font-family:'DM Sans',sans
       <input class="auth-inp" id="authUser" placeholder="Username" style="display:none" autocomplete="username">
       <input class="auth-inp" id="authPass" type="password" placeholder="Password" autocomplete="current-password" onkeydown="if(event.key==='Enter')submitAuth()">
       <button class="btn-pill btn-grad" style="width:100%;margin-top:2px" id="authBtn" onclick="submitAuth()">Login <span style="display:inline-block;animation:arrowb 1.4s ease-in-out infinite">→</span></button>
-      <div class="auth-api-row"><input id="apiUrlInp" placeholder="Backend URL (default: https://bugzyme-1.onrender.com)" onchange="setApiBase(this.value)"></div>
+      <div class="auth-api-row"><input id="apiUrlInp" placeholder="Backend URL (default: https://bugzyme-backend.onrender.com)" onchange="setApiBase(this.value)"></div>
       <div class="auth-hint">🐣 First time here? Create an account from the <b style="color:var(--ep)">Register</b> tab.<br>To chat with another user, create a second account as well!</div>
     </div>
   </div>
@@ -1135,13 +1135,21 @@ html,body{width:100%;height:100%;background:var(--bd);font-family:'DM Sans',sans
 ═══════════════════════════════════════════════════ */
 
 /* ---------- CONFIG & AUTH ---------- */
-let API_BASE = (localStorage.getItem('raahi_api') || 'https://bugzyme-backend.onrender.com').replace(/\/+$/,'');
+const PRODUCTION_API_BASE = 'https://bugzyme-backend.onrender.com';
+const LOCAL_API_BASE_PATTERN = /^http:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?$/i;
+function resolveApiBase(value){
+  const candidate = (value || '').trim().replace(/\/+$/,'');
+  return LOCAL_API_BASE_PATTERN.test(candidate) ? candidate : PRODUCTION_API_BASE;
+}
+let API_BASE = resolveApiBase(localStorage.getItem('raahi_api'));
+if (localStorage.getItem('raahi_api') !== API_BASE){
+  localStorage.setItem('raahi_api', API_BASE);
+}
 const AUTH = { token: localStorage.getItem('raahi_token') || '', me: null };
 let authMode = 'login';
 
 function setApiBase(v){
-  v = (v||'').trim() || 'https://bugzyme-1.onrender.com';
-  API_BASE = v.replace(/\/+$/,'');
+  API_BASE = resolveApiBase(v);
   localStorage.setItem('raahi_api', API_BASE);
   toast('🌐 Server set: ' + API_BASE);
 }
@@ -1823,9 +1831,7 @@ if (msg.is_deleted) {
 
 else if (msg.message_type === 'voice') {
 
-  const API_BASE =
-    localStorage.getItem('raahi_api') ||
-    'http://127.0.0.1:8000';
+  const API_BASE = resolveApiBase(localStorage.getItem('raahi_api'));
 
 
   let audioSrc = msg.audio_url || '';
@@ -1836,7 +1842,7 @@ else if (msg.message_type === 'voice') {
     /uploads/voice/xxxxx.webm
 
     We need:
-    https://bugzyme-final.onrender.com/uploads/voice/xxxxx.webm
+    https://bugzyme-backend.onrender.com/uploads/voice/xxxxx.webm
   */
 
   if (
@@ -3065,9 +3071,7 @@ recorder.onstop = async () => {
       `voice-${Date.now()}.webm`
     );
 
-    const API_BASE =
-      localStorage.getItem('raahi_api') ||
-      'http://127.0.0.1:8000';
+    const API_BASE = resolveApiBase(localStorage.getItem('raahi_api'));
 
     const token = AUTH.token;
 
