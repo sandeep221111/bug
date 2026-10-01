@@ -5,8 +5,10 @@ import contextlib
 import logging
 import os
 import uuid
+from pathlib import Path
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 
 from fastapi import (
     Depends,
@@ -16,12 +18,13 @@ from fastapi import (
     Request,
     UploadFile,
     File,
+    Form,
     WebSocket,
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
 from pwdlib import PasswordHash
@@ -31,6 +34,7 @@ from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
 from . import models, schemas
+from . import storage as attachment_storage
 from .connection_manager import ConnectionManager
 from .database import Base, SessionLocal, engine, get_db
 
@@ -356,6 +360,70 @@ def save_voice_message(
     }
 
 
+def save_attachment_message(
+    db: Session,
+    sender_id: int,
+    chat_id: int,
+    content: str | None,
+    reply_to_id: int | None,
+    storage_key: str,
+    filename: str,
+    mime_type: str,
+    size_bytes: int,
+    message_type: str,
+):
+    chat = member_chat(db, chat_id, sender_id)
+    if not chat:
+        return None
+
+    if content is not None:
+        content = content.strip()
+        if len(content) > schemas.MAX_MESSAGE_LEN:
+            return None
+        content = content or None
+
+    if reply_to_id is not None:
+        parent = db.get(models.Message, reply_to_id)
+        if not parent or parent.chat_id != chat_id or parent.is_deleted:
+            return None
+
+    message = models.Message(
+        chat_id=chat_id,
+        sender_id=sender_id,
+        content=content,
+        created_at=utcnow(),
+        is_delivered=False,
+        is_read=False,
+        is_deleted=False,
+        reply_to_id=reply_to_id,
+        message_type=message_type,
+        attachment_storage_key=storage_key,
+        attachment_name=filename,
+        attachment_mime_type=mime_type,
+        attachment_size_bytes=size_bytes,
+    )
+    db.add(message)
+    db.commit()
+    db.refresh(message)
+
+    return {
+        "id": message.id,
+        "chat_id": chat_id,
+        "sender_id": sender_id,
+        "content": message.content,
+        "created_at": iso(message.created_at),
+        "is_delivered": message.is_delivered,
+        "is_read": message.is_read,
+        "is_deleted": message.is_deleted,
+        "reply_to_id": message.reply_to_id,
+        "message_type": message.message_type,
+        "attachment_name": message.attachment_name,
+        "attachment_mime_type": message.attachment_mime_type,
+        "attachment_size_bytes": message.attachment_size_bytes,
+        "receiver_id": other_user(chat, sender_id),
+    }
+
+
 # ============================================================
 # MESSAGE DELETE
 # ============================================================
@@ -396,6 +464,7 @@ def soft_delete_message(
         "sender_id": message.sender_id,
         "for_everyone": for_everyone,
         "receiver_id": other_user(chat, user_id),
+        "attachment_storage_key": message.attachment_storage_key,
     }
 
 
@@ -959,6 +1028,141 @@ async def upload_voice(
         "message": message,
         "delivered": delivered,
     }
+
+
+@app.post(
+    "/chats/{chat_id}/attachments",
+    response_model=schemas.MessageResponse,
+    status_code=201,
+)
+async def upload_chat_attachment(
+    chat_id: int,
+    file: UploadFile = File(...),
+    caption: str | None = Form(default=None),
+    reply_to_id: int | None = Form(default=None),
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if not member_chat(db, chat_id, current_user.id):
+        raise HTTPException(403, "You are not a member of this chat")
+
+    if caption is not None and len(caption) > schemas.MAX_MESSAGE_LEN:
+        raise HTTPException(400, "Caption exceeds the 2000 character limit")
+
+    try:
+        storage_key, filename, mime_type, size_bytes, message_type = (
+            await attachment_storage.save_upload(file)
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    finally:
+        await file.close()
+
+    try:
+        message = await db_call(
+            save_attachment_message,
+            current_user.id,
+            chat_id,
+            caption,
+            reply_to_id,
+            storage_key,
+            filename,
+            mime_type,
+            size_bytes,
+            message_type,
+        )
+    except Exception:
+        await run_in_threadpool(attachment_storage.remove_attachment, storage_key)
+        raise
+
+    if message is None:
+        await run_in_threadpool(attachment_storage.remove_attachment, storage_key)
+        raise HTTPException(400, "Could not create attachment message or invalid reply")
+
+    payload = {
+        "type": "message",
+        "chat_id": chat_id,
+        "message_id": message["id"],
+        "sender_id": current_user.id,
+        "sender_name": current_user.username,
+        "content": message["content"],
+        "created_at": message["created_at"],
+        "reply_to_id": message["reply_to_id"],
+        "message_type": message_type,
+        "attachment_name": filename,
+        "attachment_mime_type": mime_type,
+        "attachment_size_bytes": size_bytes,
+    }
+    delivered = await manager.send_to_user(
+        message["receiver_id"], payload, chat_id
+    )
+
+    if delivered:
+        await db_call(mark_delivered, [message["id"]])
+        message["is_delivered"] = True
+        await manager.send_to_user(
+            current_user.id,
+            {
+                "type": "message_delivered",
+                "chat_id": chat_id,
+                "message_id": message["id"],
+            },
+            chat_id,
+        )
+
+    return message
+
+
+@app.get("/attachments/{message_id}/content")
+def get_attachment_content(
+    message_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    message = db.get(models.Message, message_id)
+    if (
+        not message
+        or message.is_deleted
+        or not message.attachment_storage_key
+        or message.message_type not in {"image", "file"}
+    ):
+        raise HTTPException(404, "Attachment not found")
+
+    chat = member_chat(db, message.chat_id, current_user.id)
+    if not chat:
+        raise HTTPException(404, "Attachment not found")
+
+    try:
+        path = attachment_storage.attachment_path(message.attachment_storage_key)
+    except ValueError as exc:
+        logger.error("Invalid attachment key on message %s", message_id)
+        raise HTTPException(404, "Attachment not found") from exc
+    if not path.is_file():
+        raise HTTPException(404, "Attachment content not found")
+
+    mime_type = message.attachment_mime_type
+    if mime_type not in {value[0] for value in attachment_storage.ALLOWED_TYPES.values()}:
+        mime_type = "application/octet-stream"
+
+    filename = Path(message.attachment_name or "attachment").name.replace("\r", "").replace("\n", "")
+    ascii_name = filename.encode("ascii", "replace").decode("ascii").replace('"', "'")
+    disposition = "inline" if message.message_type == "image" else "attachment"
+
+    def stream_file():
+        with path.open("rb") as source:
+            while chunk := source.read(64 * 1024):
+                yield chunk
+
+    headers = {
+        "Content-Disposition": (
+            f'{disposition}; filename="{ascii_name}"; '
+            f"filename*=UTF-8''{quote(filename, safe='')}"
+        ),
+        "X-Content-Type-Options": "nosniff",
+        "Cache-Control": "private, no-store",
+        "Content-Security-Policy": "default-src 'none'; sandbox",
+    }
+    return StreamingResponse(stream_file(), media_type=mime_type, headers=headers)
 # ============================================================
 # LOGIN
 # ============================================================
@@ -1347,6 +1551,11 @@ async def delete_message(
         result["chat_id"]
     )
 
+    await run_in_threadpool(
+        attachment_storage.remove_attachment,
+        result.get("attachment_storage_key"),
+    )
+
     return {
         "ok": True,
         "message_id": message_id
@@ -1674,6 +1883,11 @@ async def handle_socket(
                         result["receiver_id"],
                         delete_event,
                         result["chat_id"]
+                    )
+
+                    await run_in_threadpool(
+                        attachment_storage.remove_attachment,
+                        result.get("attachment_storage_key"),
                     )
 
             # =================================================

@@ -83,6 +83,11 @@ class MessageResponse(_FromOrm):
     audio_duration: int | None = None
     audio_mime_type: str | None = None
 
+    # Photo and document attachment metadata (never includes a storage path).
+    attachment_name: str | None = None
+    attachment_mime_type: str | None = None
+    attachment_size_bytes: int | None = None
+
     _fix_delivered = field_validator(
         "is_delivered",
         mode="before"

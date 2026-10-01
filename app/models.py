@@ -270,6 +270,28 @@ class Message(Base):
         nullable=True
     )
 
+    # Photo and document attachment metadata. The file itself is stored
+    # outside the public uploads directory and addressed by a generated key.
+    attachment_storage_key = Column(
+        String(64),
+        nullable=True
+    )
+
+    attachment_name = Column(
+        String(255),
+        nullable=True
+    )
+
+    attachment_mime_type = Column(
+        String(100),
+        nullable=True
+    )
+
+    attachment_size_bytes = Column(
+        Integer,
+        nullable=True
+    )
+
     # ========================================
     # Relationships
     # ========================================

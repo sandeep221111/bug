@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 bugzyme.db
 .DS_Store
+storage/attachments/
