@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import uuid
@@ -10,6 +11,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
+import httpx
 from fastapi import (
     Depends,
     FastAPI,
@@ -2373,7 +2375,13 @@ def login_user(
 # ============================================================
 
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
 GOOGLE_REDIRECT_URI = os.environ.get("GOOGLE_REDIRECT_URI", "http://127.0.0.1:5257/api/v1/auth/google/callback")
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
+GOOGLE_JWKS_URL = "https://www.googleapis.com/oauth2/v3/certs"
+
+_google_jwks_cache = None
 
 # In-memory OTP store (replace with Redis in production)
 _phone_otps: dict[str, str] = {}
@@ -2410,28 +2418,134 @@ def google_auth_url(redirect_uri: str | None = None):
     return {"authorization_url": auth_url, "state": uri}
 
 
+async def _fetch_google_jwks():
+    """Fetch and cache Google's JWKS for id_token verification."""
+    global _google_jwks_cache
+    if _google_jwks_cache is None:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(GOOGLE_JWKS_URL)
+            resp.raise_for_status()
+            _google_jwks_cache = resp.json()
+    return _google_jwks_cache
+
+
+async def _verify_google_id_token(id_token: str) -> dict:
+    """Verify Google id_token using JWKS and return claims."""
+    from jose import jwt
+    from jose.exceptions import JWTError
+    
+    jwks = await _fetch_google_jwks()
+    unverified_header = jwt.get_unverified_header(id_token)
+    kid = unverified_header.get("kid")
+    if not kid:
+        raise HTTPException(400, "Invalid id_token: missing kid")
+    
+    key = None
+    for k in jwks.get("keys", []):
+        if k.get("kid") == kid:
+            key = jwt.algorithms.RSAAlgorithm.from_jwk(json.dumps(k))
+            break
+    
+    if not key:
+        raise HTTPException(400, "Invalid id_token: key not found")
+    
+    try:
+        claims = jwt.decode(
+            id_token,
+            key,
+            algorithms=["RS256"],
+            audience=GOOGLE_CLIENT_ID,
+            issuer="https://accounts.google.com",
+        )
+        return claims
+    except JWTError as e:
+        raise HTTPException(401, f"Invalid id_token: {e}")
+
+
+async def _exchange_code_for_tokens(code: str, redirect_uri: str) -> dict:
+    """Exchange authorization code for access_token and id_token."""
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.post(
+            GOOGLE_TOKEN_URL,
+            data={
+                "code": code,
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "redirect_uri": redirect_uri,
+                "grant_type": "authorization_code",
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        if resp.status_code != 200:
+            raise HTTPException(400, f"Token exchange failed: {resp.text}")
+        return resp.json()
+
+
 @app.post("/api/v1/auth/google/callback")
-def google_callback(data: dict, db: Session = Depends(get_db)):
+async def google_callback(data: dict, db: Session = Depends(get_db)):
     code = data.get("code")
     id_token = data.get("id_token")
+    redirect_uri = data.get("redirect_uri") or GOOGLE_REDIRECT_URI
+    
     if not code and not id_token:
         raise HTTPException(400, "Missing authorization code or id_token")
 
-    user = None
-    if id_token:
-        try:
-            from jose import jwt
-            unverified = jwt.get_unverified_claims(id_token)
-            email = unverified.get("email")
-            if email:
-                user = db.query(models.User).filter(
-                    func.lower(models.User.email) == email.lower()
-                ).first()
-        except Exception:
-            pass
+    # If code provided, exchange for tokens
+    if code and not id_token:
+        if not GOOGLE_CLIENT_SECRET:
+            raise HTTPException(500, "Google OAuth not fully configured: set GOOGLE_CLIENT_SECRET")
+        tokens = await _exchange_code_for_tokens(code, redirect_uri)
+        id_token = tokens.get("id_token")
+        if not id_token:
+            raise HTTPException(400, "No id_token in token response")
 
+    # Verify id_token with Google's JWKS
+    try:
+        claims = await _verify_google_id_token(id_token)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(401, f"Token verification failed: {e}")
+
+    email = claims.get("email")
+    if not email:
+        raise HTTPException(400, "Email not in id_token")
+
+    # Find or create user
+    user = db.query(models.User).filter(
+        func.lower(models.User.email) == email.lower()
+    ).first()
+    
+    is_new_user = False
     if not user:
-        raise HTTPException(401, "Google authentication failed")
+        is_new_user = True
+        username = email.split("@")[0]
+        # Ensure unique username
+        base_username = username
+        counter = 1
+        while db.query(models.User).filter(models.User.username == username).first():
+            username = f"{base_username}{counter}"
+            counter += 1
+        
+        user = models.User(
+            username=username,
+            email=email,
+            hashed_password="",  # No password for OAuth users
+            full_name=claims.get("name"),
+        )
+        db.add(user)
+        db.flush()
+        
+        # Create dating profile placeholder
+        dating_profile = models.DatingProfile(
+            user_id=user.id,
+            sex="prefer_not_to_say",
+            orientation="straight",
+            verification_status="unverified",
+        )
+        db.add(dating_profile)
+        db.commit()
+        db.refresh(user)
 
     return {
         "access_token": create_token(user.id),
@@ -2442,7 +2556,7 @@ def google_callback(data: dict, db: Session = Depends(get_db)):
             "email": user.email,
             "full_name": getattr(user, "full_name", None),
         },
-        "is_new_user": False,
+        "is_new_user": is_new_user,
     }
 
 
