@@ -41,8 +41,9 @@ from .connection_manager import ConnectionManager
 from .database import Base, SessionLocal, engine, get_db
 from .models import Interaction
 from .ai.suggestions import suggest_next_messages
-from .ai.conversation_coach import build_private_coaching
+from .ai.conversation_coach import build_private_coaching, generate_private_coaching, CoachServiceError
 from .ai.conversation_insights import build_conversation_insights
+from .ai.conversation_intelligence import build_conversation_intelligence
 from ml.dating_ml_model.model import CompatibilityModel
 from ml.dating_ml_model.repository import SQLAlchemyUserRepository
 
@@ -818,12 +819,48 @@ async def chat_coach(
     )
 
     if not messages:
-        return {"available": False, "insights": []}
+        return {"available": False, "reason": "no_context", "insights": [], "user_id": current_user.id}
 
-    result = build_private_coaching(
-        messages=messages,
-        own_user_id=current_user.id,
-    )
+    # Build conversation intelligence to get participant views and shared context
+    intelligence = build_conversation_intelligence(messages)
+    participant_view = intelligence["participant_views"].get(str(current_user.id), {})
+    shared = intelligence["shared"]
+
+    # Get user's dating profile if available
+    dating_profile = db.query(models.DatingProfile).filter(models.DatingProfile.user_id == current_user.id).first()
+    own_profile = {
+        "communication": participant_view.get("communication", {}),
+        "mood": participant_view.get("mood", {}),
+        "dating_profile": {
+            "full_name": dating_profile.full_name,
+            "bio": dating_profile.bio,
+            "city": dating_profile.city,
+            "education": dating_profile.education,
+            "job": dating_profile.job,
+        } if dating_profile else None
+    }
+
+    shared_context = {
+        "mood": shared.get("mood", {}),
+        "shared_topics": shared.get("topics", {}).get("supported_shared_topics", []),
+        "engagement_trend": shared.get("engagement", {}).get("trend", "unknown"),
+    }
+
+    try:
+        result = generate_private_coaching(
+            messages=messages,
+            own_user_id=current_user.id,
+            own_profile=own_profile,
+            shared_context=shared_context,
+        )
+    except CoachServiceError as exc:
+        if exc.code == "provider_not_configured":
+            raise HTTPException(503, detail={"code": "provider_not_configured"})
+        if exc.code == "provider_failure":
+            raise HTTPException(503, detail={"code": "provider_failure"})
+        if exc.code == "invalid_provider_response":
+            raise HTTPException(502, detail={"code": "invalid_provider_response"})
+        raise HTTPException(500, detail={"code": "internal_error"})
     return result
 
 

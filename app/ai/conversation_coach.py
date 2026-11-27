@@ -13,13 +13,13 @@ class CoachServiceError(RuntimeError):
 def build_private_coaching(messages: list, intelligence: dict | None = None,
                            own_user_id: int | None = None) -> dict:
     if not messages:
-        return {"available": False, "insights": []}
+        return {"available": False, "insights": [], "user_id": own_user_id}
     # Individual feedback uses only this account's messages. Shared topics
     # come from the chat-level context and contain no private profile data.
     own = [m for m in messages if own_user_id is None or str(_get(m, "sender_id", "")) == str(own_user_id)]
     recent = own[-12:]
     if not recent:
-        return {"available": False, "insights": []}
+        return {"available": False, "insights": [], "user_id": own_user_id}
     texts = [str(_get(m, "content", _get(m, "message", ""))) for m in recent]
     detected = _detect_language("\n".join(texts))
     questions = sum("?" in text for text in texts[-5:])
@@ -60,7 +60,7 @@ def build_private_coaching(messages: list, intelligence: dict | None = None,
         for item in items:
             item["message"] = phrases.get(item["key"], item["message"])
     # Avoid accidentally returning identity or another participant's profile.
-    return {"available": True, "insights": items[:4], "private": True}
+    return {"available": True, "insights": items[:4], "private": True, "user_id": own_user_id}
 
 
 def generate_private_coaching(messages: list, own_user_id: int,
@@ -74,9 +74,9 @@ def generate_private_coaching(messages: list, own_user_id: int,
         and _get(item, "content", "").strip()
     ][-10:]
     if not own_messages:
-        return {"available": False, "reason": "missing_profile", "insights": []}
+        return {"available": False, "reason": "missing_profile", "insights": [], "user_id": own_user_id}
     if not isinstance(own_profile, dict):
-        return {"available": False, "reason": "missing_profile", "insights": []}
+        return {"available": False, "reason": "missing_profile", "insights": [], "user_id": own_user_id}
 
     comm = own_profile.get("communication") or {}
     mood = own_profile.get("mood") or {}
@@ -135,4 +135,4 @@ def generate_private_coaching(messages: list, own_user_id: int,
     except Exception as exc:
         raise CoachServiceError("invalid_provider_response") from exc
 
-    return {"available": True, "private": True, "insights": clean}
+    return {"available": True, "private": True, "insights": clean, "user_id": own_user_id}

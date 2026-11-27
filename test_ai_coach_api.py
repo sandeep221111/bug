@@ -14,6 +14,7 @@ def api_context():
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     models.Base.metadata.create_all(engine, tables=[
         models.User.__table__, models.Chat.__table__, models.Message.__table__,
+        models.DatingProfile.__table__,
     ])
     factory = sessionmaker(bind=engine)
     db = factory()
