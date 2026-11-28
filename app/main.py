@@ -6,6 +6,8 @@ import json
 import logging
 import os
 import uuid
+from dotenv import load_dotenv
+load_dotenv()
 from pathlib import Path
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
