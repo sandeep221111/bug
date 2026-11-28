@@ -2420,6 +2420,16 @@ def google_auth_url(redirect_uri: str | None = None):
     return {"authorization_url": auth_url, "state": uri}
 
 
+@app.get("/api/v1/auth/google/config")
+def google_config():
+    if not GOOGLE_CLIENT_ID:
+        raise HTTPException(
+            500,
+            "Google OAuth not configured: set GOOGLE_CLIENT_ID env variable"
+        )
+    return {"client_id": GOOGLE_CLIENT_ID}
+
+
 async def _fetch_google_jwks():
     """Fetch and cache Google's JWKS for id_token verification."""
     global _google_jwks_cache
@@ -2434,6 +2444,7 @@ async def _fetch_google_jwks():
 async def _verify_google_id_token(id_token: str) -> dict:
     """Verify Google id_token using JWKS and return claims."""
     from jose import jwt
+    from jose.backends import RSAKey
     from jose.exceptions import JWTError
     
     jwks = await _fetch_google_jwks()
@@ -2445,7 +2456,7 @@ async def _verify_google_id_token(id_token: str) -> dict:
     key = None
     for k in jwks.get("keys", []):
         if k.get("kid") == kid:
-            key = jwt.algorithms.RSAAlgorithm.from_jwk(json.dumps(k))
+            key = RSAKey(key=k, algorithm="RS256")
             break
     
     if not key:
